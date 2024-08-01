@@ -1,9 +1,8 @@
-#include <openssl/evp.h>
 #include <string.h>
 #include <stdlib.h>
-#include <getopt.h>
 #include <stdio.h>
 #include <FreeImage.h>
+#include <openssl/evp.h>
 
 typedef struct {
     char* key;
@@ -39,12 +38,12 @@ void encryption_error_handler(void) {
     exit(EXIT_FAILURE);
 }
 
-void data_too_large_error_handler(int maxCapacity) {
+void data_too_large_error_handler(size_t maxCapacity) {
     fprintf(stderr, "Data too large to embed in the image. Maximum capacity is %zu bytes\n", maxCapacity);
     exit(EXIT_FAILURE);
 }
 
-void unsupported_image_error_handler(void) {
+void unsupported_format_error_handler(void) {
     fprintf(stderr, "Unsupported image format. Only 24-bit and 32-bit images are supported\n");
     exit(EXIT_FAILURE);
 }
@@ -65,6 +64,7 @@ void convert_to_bmp(char* input_filename, EncryptionInfo* encInfo) {
 }
 
 EncryptionInfo process_command_line(int argc, char* argv[]) {
+    // Ignore program name
     argv++;
     argc--;
 
@@ -72,6 +72,7 @@ EncryptionInfo process_command_line(int argc, char* argv[]) {
 
     while (argc >= 2 && strncmp(argv[0], "--", 2) == 0 && strlen(argv[1]) > 0) {
         if (!strcmp(argv[0], "--key") && !encInfo.key) {
+            // Using 256 bit AES
             encInfo.key = (char*)malloc(257);
             if (strlen(argv[1]) > 256) usage_error_handler();
             snprintf(encInfo.key, 257, "%s", argv[1]);
@@ -79,6 +80,7 @@ EncryptionInfo process_command_line(int argc, char* argv[]) {
             argv += 2;
         }
         else if (!strcmp(argv[0], "--iv") && !encInfo.iv) {
+            // IV size for 256 bit AES (i.e. 256 bit key) is 128 bits
             encInfo.iv = (char*)malloc(129);
             if (strlen(argv[1]) > 128) usage_error_handler();
             snprintf(encInfo.iv, 129, "%s", argv[1]);
@@ -115,6 +117,7 @@ CipherInfo encrypt_text(EncryptionInfo encInfo) {
     CipherInfo cipherInfo = { NULL, 0 };
     int len;
 
+    // Set up our context
     if (!(ctx = EVP_CIPHER_CTX_new())) {
         encryption_error();
     }
@@ -123,7 +126,7 @@ CipherInfo encrypt_text(EncryptionInfo encInfo) {
         encryption_error();
     }
 
-    // Give it another block
+    // Need another block
     cipherInfo.cipherText = (unsigned char*)malloc(encInfo.textLength + EVP_CIPHER_block_size(EVP_aes_256_cbc()));
 
     if (1 != EVP_EncryptUpdate(ctx, cipherInfo.cipherText, &len, encInfo.text, encInfo.textLength)) {
@@ -141,7 +144,7 @@ CipherInfo encrypt_text(EncryptionInfo encInfo) {
     return cipherInfo;
 }
 
-void embedData(EncryptionInfo* encInfo, CipherInfo cipherInfo) {
+void embed_cipher(EncryptionInfo* encInfo, CipherInfo cipherInfo) {
     BYTE* bits = FreeImage_GetBits(encInfo->bitmap);
     unsigned width = FreeImage_GetWidth(encInfo->bitmap);
     unsigned height = FreeImage_GetHeight(encInfo->bitmap);
@@ -149,7 +152,7 @@ void embedData(EncryptionInfo* encInfo, CipherInfo cipherInfo) {
     unsigned bitsPerPixel = FreeImage_GetBPP(encInfo->bitmap);
 
     if (bitsPerPixel != 24 && bitsPerPixel != 32) {
-        unsupported_image_error_handler();
+        unsupported_format_error_handler();
     }
 
     size_t maxCapacity = (width * height * (bitsPerPixel / 8)) / 8;
@@ -157,23 +160,23 @@ void embedData(EncryptionInfo* encInfo, CipherInfo cipherInfo) {
         data_too_large_error_handler(maxCapacity);
     }
 
-    size_t data_idx = 0;
+    size_t dataID = 0;
 
     for (unsigned y = 0; y < height; ++y) {
         BYTE* pixel = bits + y * pitch;
         for (unsigned x = 0; x < width; ++x) {
             for (unsigned channel = 0; channel < (bitsPerPixel / 8); ++channel) {
-                if (data_idx < cipherInfo.cipherLength * 8) {
+                if (dataID < cipherInfo.cipherLength * 8) {
                     // Embed one bit of data into the LSB of the current channel
-                    pixel[channel] = (pixel[channel] & 0xFE) | ((cipherInfo.cipherText[data_idx / 8] >> (7 - (data_idx % 8))) & 1);
-                    data_idx++;
+                    pixel[channel] = (pixel[channel] & 0xFE) | ((cipherInfo.cipherText[dataID / 8] >> (7 - (dataID % 8))) & 1);
+                    dataID++;
                 }
             }
             pixel += (bitsPerPixel / 8); // Move to the next pixel
         }
     }
 
-    if (data_idx < cipherInfo.cipherLength * 8) {
+    if (dataID < cipherInfo.cipherLength * 8) {
         fprintf(stderr, "Warning: Not all data was embedded into the image. Image may be too small\n");
     }
 }
@@ -198,12 +201,11 @@ void free_cipher_info(CipherInfo* cipherInfo) {
 
 int main(int argc, char* argv[]) {
     EncryptionInfo encInfo = process_command_line(argc, argv);
-    printf("%s\n", encInfo.text);
-    printf("%d\n", encInfo.textLength);
-    printf("%s\n", encInfo.text);
     CipherInfo cipherInfo = encrypt_text(encInfo);
+
     printf("Cipher text: %s\n", cipherInfo.cipherText);
     printf("Cipher length: %d\n", cipherInfo.cipherLength);
-    // free_encryption_info(&encInfo);
+
+    embed_cipher(&encInfo, cipherInfo);
     return 0;
 }
